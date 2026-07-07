@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+fico2_paco2_converter.py
+========================
+Reversible conversion between inspired CO2 fraction (FiCO2) and arterial /
+end-tidal CO2 partial pressure (PaCO2 = PetCO2), using the *simplified*
+hypercapnic-ventilatory-response (HCVR) method with a single fixed slope
+S = 2.69 L.min^-1.mmHg^-1  (Hirshman et al. 1975: mean 2.69 +/- 0.19).
+
+Assumption: PaCO2 = PetCO2 = P_ACO2 (ideal alveolar / arterial equilibration).
+
+--------------------------------------------------------------------------
+Governing equation (implicit, forward = solve for FiCO2 given PaCO2):
+
+    PaCO2 = FiCO2*(Patm - PH2O)  +  K * VCO2 / VA(PaCO2)                (Eq. 9)
+
+with the CO2-sensitive alveolar ventilation
+
+    VA(PaCO2) = VA_base + S * (PaCO2 - PaCO2_base)                     (Eq. 8)
+
+Because VA is *linear* in PaCO2, Eq. 9 is a QUADRATIC in PaCO2 and has an
+exact closed-form solution -- no iterative root finding is required.
+
+    S*PaCO2^2 + (D - S*PICO2)*PaCO2 - (PICO2*D + K*VCO2) = 0
+        where  D = VA_base - S*PaCO2_base,   PICO2 = FiCO2*(Patm - PH2O)
+
+    PaCO2 = [ (S*PICO2 - D) + sqrt((S*PICO2 - D)^2 + 4*S*(PICO2*D + K*VCO2)) ]
+            / (2*S)                                                    (physical root)
+
+Units convention for K:
+    K = 0.863 when VCO2 is in mL.min^-1 (STPD) and VA is in L.min^-1 (BTPS).
+    (K = (310/273)*760 / 1000 = 0.863;  see documentation.)
+
+--------------------------------------------------------------------------
+How VA_base is chosen (matches the two "currencies" seen in the literature):
+
+  * If a baseline PaCO2 (PaCO2_base) is known, VA_base is set for
+    self-consistency,  VA_base = K*VCO2/PaCO2_base, so that FiCO2 = 0 returns
+    the baseline exactly.
+  * If only FiCO2 is known (no baseline), we fall back to PaCO2_base = 40 mmHg
+    together with the *literature resting alveolar ventilation* VA_base = 4.2
+    L/min (West, Respiratory Physiology; Nunn's Applied Respiratory
+    Physiology: "typical resting values might be ~4 L/min for alveolar
+    ventilation"). These two are not perfectly self-consistent, but the steep
+    HCVR feedback absorbs the small VA_base difference, so FiCO2 = 0 returns
+    ~40.04 mmHg -- a negligible <0.1 mmHg offset from the assumed 40.
+
+Author: prepared for M. Kim, Isometabolism Review / Technical Note (2026).
+"""
+
+from __future__ import annotations
+import argparse
+import math
+from dataclasses import dataclass
+
+MMHG_PER_KPA = 7.500617       # 1 kPa = 7.500617 mmHg
+KPA_PER_MMHG = 0.1333224      # 1 mmHg = 0.1333224 kPa
+
+# Literature resting alveolar ventilation, L/min (BTPS).
+# West, Respiratory Physiology: The Essentials; Nunn's Applied Respiratory
+# Physiology ("typical resting values might be ~4 L/min for alveolar
+# ventilation"). Zotero library -> "CO2 Ventilation" collection.
+VA_REST = 4.2
+
+DEFAULT_BASELINE = 40.0        # normocapnic resting PaCO2, mmHg
+
+
+@dataclass
+class Params:
+    """Physiological / environmental constants for the simplified converter."""
+    S: float = 2.69            # HCVR slope, L.min^-1.mmHg^-1 (Hirshman 1975)
+    VCO2: float = 200.0        # CO2 output, mL.min^-1 STPD (Nunn's: 150-200)
+    PaCO2_base: float = 40.0   # baseline (normocapnic) PaCO2, mmHg
+    VA_base: float | None = None  # baseline alveolar ventilation, L.min^-1 BTPS
+    Patm: float = 760.0        # barometric pressure, mmHg
+    PH2O: float = 47.0         # saturated water-vapour pressure at 37 C, mmHg
+    K: float = 0.863           # STPD->BTPS / fraction->pressure constant
+
+    def __post_init__(self):
+        # If VA_base is not supplied, fix it so that FiCO2 = 0 reproduces the
+        # baseline PaCO2 exactly (self-consistency):  VA_base = K*VCO2/PaCO2_base
+        if self.VA_base is None:
+            self.VA_base = self.K * self.VCO2 / self.PaCO2_base
+
+    @property
+    def Pdry(self) -> float:
+        """Dry-gas partial-pressure scaling (Patm - PH2O), mmHg."""
+        return self.Patm - self.PH2O
+
+    @property
+    def D(self) -> float:
+        """Constant part of the ventilation denominator: VA_base - S*PaCO2_base."""
+        return self.VA_base - self.S * self.PaCO2_base
+
+    def VA(self, paco2: float) -> float:
+        """CO2-sensitive alveolar ventilation at a given PaCO2 (L.min^-1)."""
+        return self.VA_base + self.S * (paco2 - self.PaCO2_base)
+
+
+# --------------------------------------------------------------------------
+# Parameter builders for the two "known-inputs" scenarios
+# --------------------------------------------------------------------------
+def params_from_baseline(paco2_base: float, **kw) -> Params:
+    """Baseline PaCO2 is known -> VA_base is set self-consistently.
+
+    VA_base = K*VCO2/PaCO2_base, so FiCO2 = 0 reproduces PaCO2_base exactly.
+    Use for both directions whenever the user supplies a baseline PaCO2.
+    """
+    return Params(PaCO2_base=paco2_base, VA_base=None, **kw)
+
+
+def params_resting_default(**kw) -> Params:
+    """Only FiCO2 is known (no baseline) -> literature resting fallback.
+
+    PaCO2_base = 40 mmHg (HCVR reference point) and VA_base = 4.2 L/min
+    (West / Nunn's resting alveolar ventilation). These are not perfectly
+    self-consistent, so FiCO2 = 0 gives ~41 mmHg (a documented ~1 mmHg offset).
+    """
+    return Params(PaCO2_base=DEFAULT_BASELINE, VA_base=VA_REST, **kw)
+
+
+# --------------------------------------------------------------------------
+# Forward direction:  PaCO2  ->  FiCO2   (explicit, algebraic)
+# --------------------------------------------------------------------------
+def paco2_to_fico2(paco2_mmhg: float, p: Params | None = None,
+                   as_percent: bool = True) -> float:
+    """Given a target PaCO2 (mmHg), return the inspired CO2 fraction FiCO2.
+
+    FiCO2 = [ PaCO2 - K*VCO2 / VA(PaCO2) ] / (Patm - PH2O)
+    Returns a percentage by default, or a fraction if as_percent=False.
+    """
+    p = p or Params()
+    va = p.VA(paco2_mmhg)
+    if va <= 0:
+        raise ValueError(f"Non-physical: alveolar ventilation <= 0 at PaCO2={paco2_mmhg}")
+    pico2 = paco2_mmhg - p.K * p.VCO2 / va      # inspired CO2 partial pressure, mmHg
+    fico2 = pico2 / p.Pdry
+    return fico2 * 100.0 if as_percent else fico2
+
+
+# --------------------------------------------------------------------------
+# Reverse direction:  FiCO2  ->  PaCO2   (exact closed-form quadratic root)
+# --------------------------------------------------------------------------
+def fico2_to_paco2(fico2, p: Params | None = None,
+                   is_percent: bool = True) -> float:
+    """Given inspired CO2 (percent by default), return PaCO2 in mmHg.
+
+    Solves the quadratic exactly and returns the physical (upper) root.
+    """
+    p = p or Params()
+    fico2_frac = fico2 / 100.0 if is_percent else float(fico2)
+    if fico2_frac < 0:
+        raise ValueError("FiCO2 cannot be negative.")
+    pico2 = fico2_frac * p.Pdry                  # inspired CO2 partial pressure, mmHg
+    a = p.S
+    b = p.D - p.S * pico2
+    c = -(pico2 * p.D + p.K * p.VCO2)
+    disc = b * b - 4 * a * c
+    if disc < 0:
+        raise ValueError("No real solution (negative discriminant).")
+    paco2 = (-b + math.sqrt(disc)) / (2 * a)     # '+' root is the physical one
+    if p.VA(paco2) <= 0:
+        raise ValueError("Solved PaCO2 lies below the apnoeic threshold (VA<=0).")
+    return paco2
+
+
+# --------------------------------------------------------------------------
+# Independent numerical cross-check (root finder) -- for verification only
+# --------------------------------------------------------------------------
+def fico2_to_paco2_numeric(fico2, p: Params | None = None,
+                           is_percent: bool = True) -> float:
+    """Bisection solver bracketed to the physical branch (VA>0). Used to
+    confirm the closed-form result; not needed for normal use."""
+    p = p or Params()
+    fico2_frac = fico2 / 100.0 if is_percent else float(fico2)
+    pico2 = fico2_frac * p.Pdry
+
+    def resid(x):
+        return x - (pico2 + p.K * p.VCO2 / p.VA(x))
+
+    lo = p.PaCO2_base - p.VA_base / p.S + 1e-6   # apnoeic threshold (VA -> 0)
+    hi = 400.0
+    flo, fhi = resid(lo), resid(hi)
+    if flo * fhi > 0:
+        raise ValueError("Root not bracketed on the physical branch.")
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        fm = resid(mid)
+        if abs(fm) < 1e-12:
+            return mid
+        if flo * fm < 0:
+            hi, fhi = mid, fm
+        else:
+            lo, flo = mid, fm
+    return 0.5 * (lo + hi)
+
+
+# --------------------------------------------------------------------------
+# Convenience unit helpers
+# --------------------------------------------------------------------------
+def mmhg_to_kpa(x: float) -> float:
+    return x * KPA_PER_MMHG
+
+
+def kpa_to_mmhg(x: float) -> float:
+    return x * MMHG_PER_KPA
+
+
+# --------------------------------------------------------------------------
+# Interactive, input-driven front end
+# --------------------------------------------------------------------------
+def _ask_float(prompt: str, default: float | None = None) -> float:
+    """Prompt until the user types a valid number. Blank -> default (if given)."""
+    while True:
+        suffix = f" [{default}]" if default is not None else ""
+        raw = input(f"{prompt}{suffix}: ").strip()
+        if not raw and default is not None:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            print("  Please enter a number (e.g. 40 or 5.5).")
+
+
+def _ask_yes_no(prompt: str, default: bool = True) -> bool:
+    """Prompt for yes/no. Blank -> default."""
+    tag = "Y/n" if default else "y/N"
+    while True:
+        raw = input(f"{prompt} [{tag}]: ").strip().lower()
+        if not raw:
+            return default
+        if raw in ("y", "yes"):
+            return True
+        if raw in ("n", "no"):
+            return False
+        print("  Please answer y or n.")
+
+
+def run_paco2_to_fico2() -> None:
+    """Direction 1: user knows a target PaCO2 (and baseline) -> estimate FiCO2."""
+    print("\n-- Estimate FiCO2 from a target PaCO2 --")
+    paco2 = _ask_float("Target PaCO2 (the hypercapnic level), mmHg")
+    paco2_base = _ask_float("Baseline (normocapnic) PaCO2, mmHg", default=DEFAULT_BASELINE)
+    p = params_from_baseline(paco2_base)
+    print(f"# VA_base = K*VCO2/PaCO2_base = {p.VA_base:.3f} L/min  "
+          f"(S={p.S}, VCO2={p.VCO2} mL/min)")
+    fi = paco2_to_fico2(paco2, p)
+    va_at = p.VA(paco2)
+    print(f"\n  PaCO2 = {paco2:.2f} mmHg ({mmhg_to_kpa(paco2):.3f} kPa)")
+    print(f"  baseline PaCO2 = {paco2_base:.2f} mmHg")
+    print(f"  VA at hypercapnia = {va_at:.3f} L/min")
+    print(f"  ->  FiCO2 = {fi:.3f} %  (PICO2 = {fi/100*p.Pdry:.2f} mmHg)")
+
+
+def run_fico2_to_paco2() -> None:
+    """Direction 2: user knows FiCO2 -> estimate PaCO2.
+
+    Two sub-cases:
+      * baseline known  -> VA_base self-consistent (K*VCO2/PaCO2_base)
+      * baseline unknown -> PaCO2_base = 40, VA_base = 4.2 L/min (literature rest)
+    """
+    print("\n-- Estimate PaCO2 from a given FiCO2 --")
+    fico2 = _ask_float("Inspired CO2, FiCO2 (percent, e.g. 5)")
+    knows_base = _ask_yes_no("Do you know the subject's baseline (normocapnic) PaCO2?",
+                             default=False)
+    if knows_base:
+        paco2_base = _ask_float("Baseline PaCO2, mmHg", default=DEFAULT_BASELINE)
+        p = params_from_baseline(paco2_base)
+        note = (f"# baseline known -> VA_base = K*VCO2/PaCO2_base = "
+                f"{p.VA_base:.3f} L/min (self-consistent)")
+    else:
+        p = params_resting_default()
+        note = (f"# baseline unknown -> assume PaCO2_base = {p.PaCO2_base:.0f} mmHg, "
+                f"VA_base = {p.VA_base:.1f} L/min (West/Nunn's resting VA)")
+    print(note)
+    pa = fico2_to_paco2(fico2, p)
+    print(f"\n  FiCO2 = {fico2:.3f} %  (PICO2 = {fico2/100*p.Pdry:.2f} mmHg)")
+    print(f"  VA at hypercapnia = {p.VA(pa):.3f} L/min")
+    print(f"  ->  PaCO2 = {pa:.2f} mmHg = {mmhg_to_kpa(pa):.3f} kPa  "
+          f"(rise of {pa - p.PaCO2_base:+.2f} mmHg from baseline)")
+
+
+def interactive() -> None:
+    """Top-level interactive menu."""
+    print("=" * 66)
+    print(" FiCO2 <-> PaCO2 converter  (simplified HCVR, S = 2.69)")
+    print("=" * 66)
+    print(" What do you know / want?")
+    print("   1) I have a target PaCO2  ->  estimate FiCO2")
+    print("   2) I have an inspired FiCO2  ->  estimate PaCO2")
+    while True:
+        choice = input(" Enter 1 or 2 (q to quit): ").strip().lower()
+        if choice == "1":
+            run_paco2_to_fico2()
+            return
+        if choice == "2":
+            run_fico2_to_paco2()
+            return
+        if choice in ("q", "quit", "exit"):
+            return
+        print("  Please type 1, 2, or q.")
+
+
+# --------------------------------------------------------------------------
+# Self-test
+# --------------------------------------------------------------------------
+def _selftest() -> None:
+    """Reproduce the worked examples and check both directions."""
+    print("=" * 64)
+    print("SELF-TEST")
+    print("=" * 64)
+
+    # (A) Note's worked example: baseline PaCO2 = 30 -> target 60 -> FiCO2 ~8.1%.
+    note = params_from_baseline(30.0)  # VA_base auto = 5.753 L/min
+    f = paco2_to_fico2(60.0, note)
+    p = fico2_to_paco2(f, note)
+    print(f"[note] PaCO2 60 -> FiCO2 {f:6.3f}%  (expected ~8.1%)")
+    print(f"[note] FiCO2 {f:.3f}% -> PaCO2 {p:7.4f}  (expected 60)")
+    assert abs(f - 8.135) < 0.01
+    assert abs(p - 60.0) < 1e-6
+
+    # (B) Default normocapnic baseline (PaCO2 = 40), round-trip + numeric check.
+    dp = params_from_baseline(40.0)  # VA_base auto = 4.315 L/min
+    print(f"\n[baseline=40] VA_base = {dp.VA_base:.3f} L/min (self-consistent)")
+    print(f"{'FiCO2 %':>8} {'PaCO2 mmHg':>12} {'PaCO2 kPa':>11} {'numeric':>10} {'round-trip %':>13}")
+    for fi in (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0):
+        pa = fico2_to_paco2(fi, dp)
+        num = fico2_to_paco2_numeric(fi, dp)
+        rt = paco2_to_fico2(pa, dp)
+        assert abs(pa - num) < 1e-6, "closed-form vs numeric mismatch"
+        assert abs(rt - fi) < 1e-9, "round-trip mismatch"
+        print(f"{fi:8.1f} {pa:12.3f} {mmhg_to_kpa(pa):11.3f} {num:10.3f} {rt:13.4f}")
+
+    # (C) Resting fallback (no baseline): VA_base = 4.2, PaCO2_base = 40.
+    rp = params_resting_default()
+    pa0 = fico2_to_paco2(0.0, rp)
+    print(f"\n[resting fallback] VA_base = {rp.VA_base:.1f} L/min, "
+          f"FiCO2 0% -> PaCO2 {pa0:.3f} mmHg (expect ~40.04, <0.1 mmHg offset)")
+    assert abs(pa0 - 40.0) < 0.1
+    print("\nAll self-tests passed.")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Reversible FiCO2 <-> PaCO2 converter (simplified HCVR, S=2.69).")
+    ap.add_argument("--fico2", type=float, help="inspired CO2 (percent) -> PaCO2")
+    ap.add_argument("--paco2", type=float, help="target PaCO2 (mmHg) -> FiCO2")
+    ap.add_argument("--paco2-kpa", type=float, help="target PaCO2 (kPa) -> FiCO2")
+    ap.add_argument("--baseline", type=float, default=None,
+                    help="baseline PaCO2, mmHg. If omitted with --fico2, uses the "
+                         "resting fallback (PaCO2_base=40, VA_base=4.2 L/min).")
+    ap.add_argument("--vco2", type=float, default=200.0,
+                    help="CO2 output, mL/min STPD (default 200)")
+    ap.add_argument("--va-base", type=float, default=None,
+                    help="override baseline alveolar ventilation, L/min")
+    ap.add_argument("--slope", type=float, default=2.69,
+                    help="HCVR slope S, L/min/mmHg (default 2.69)")
+    ap.add_argument("--patm", type=float, default=760.0, help="barometric pressure, mmHg")
+    ap.add_argument("--selftest", action="store_true", help="run built-in verification")
+    ap.add_argument("--interactive", "-i", action="store_true",
+                    help="prompt for values interactively")
+    args = ap.parse_args()
+
+    if args.selftest:
+        _selftest()
+        return
+
+    # No conversion on the command line -> interactive menu.
+    if args.interactive or not (args.fico2 is not None or args.paco2 is not None
+                                or args.paco2_kpa is not None):
+        interactive()
+        return
+
+    # --- FiCO2 -> PaCO2 (respects the baseline/resting-fallback rule) ---
+    if args.fico2 is not None:
+        if args.baseline is not None or args.va_base is not None:
+            base = args.baseline if args.baseline is not None else DEFAULT_BASELINE
+            p = Params(S=args.slope, VCO2=args.vco2, PaCO2_base=base,
+                       VA_base=args.va_base, Patm=args.patm)
+        else:
+            p = params_resting_default(S=args.slope, VCO2=args.vco2, Patm=args.patm)
+        pa = fico2_to_paco2(args.fico2, p)
+        print(f"# PaCO2_base={p.PaCO2_base:.1f} mmHg, VA_base={p.VA_base:.3f} L/min, "
+              f"S={p.S}, VCO2={p.VCO2}")
+        print(f"FiCO2 = {args.fico2:.3f} %  ->  PaCO2 = {pa:.2f} mmHg = "
+              f"{mmhg_to_kpa(pa):.3f} kPa")
+
+    # --- PaCO2 -> FiCO2 (baseline required; defaults to 40) ---
+    if args.paco2 is not None or args.paco2_kpa is not None:
+        base = args.baseline if args.baseline is not None else DEFAULT_BASELINE
+        p = Params(S=args.slope, VCO2=args.vco2, PaCO2_base=base,
+                   VA_base=args.va_base, Patm=args.patm)
+        print(f"# PaCO2_base={p.PaCO2_base:.1f} mmHg, VA_base={p.VA_base:.3f} L/min, "
+              f"S={p.S}, VCO2={p.VCO2}")
+        if args.paco2 is not None:
+            fi = paco2_to_fico2(args.paco2, p)
+            print(f"PaCO2 = {args.paco2:.2f} mmHg  ->  FiCO2 = {fi:.3f} %")
+        if args.paco2_kpa is not None:
+            pa_mmhg = kpa_to_mmhg(args.paco2_kpa)
+            fi = paco2_to_fico2(pa_mmhg, p)
+            print(f"PaCO2 = {args.paco2_kpa:.3f} kPa ({pa_mmhg:.2f} mmHg)  ->  "
+                  f"FiCO2 = {fi:.3f} %")
+
+
+if __name__ == "__main__":
+    main()

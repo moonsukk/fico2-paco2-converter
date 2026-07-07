@@ -1,0 +1,7 @@
+# Core converter (fico2_paco2_converter.py) and tests use only the Python
+# standard library -- nothing to install.
+#
+# The optional plot cell and the interactive notebook use these:
+matplotlib>=3.5     # optional: sensitivity plot in the notebook
+notebook>=6.4       # optional: to run FiCO2_PaCO2_conversion.ipynb
+pytest>=7.0         # optional: nicer test runner (tests also run standalone)
