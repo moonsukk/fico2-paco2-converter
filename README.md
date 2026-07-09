@@ -24,6 +24,32 @@ VA(PaCO2) = VA_base + S·(PaCO2 − PaCO2_base)              (linear HCVR)
 Because `VA` is linear in PaCO₂, the reverse direction (FiCO₂ → PaCO₂) is a **quadratic
 with an exact closed-form root** — no iterative solver needed.
 
+## Two models
+
+**Model A — steady-state (default).** Assumes the ventilatory response has fully developed.
+Linear HCVR, reversible in closed form. Use for typical human challenges held long enough to
+equilibrate (minutes).
+
+**Model B — time-resolved.** Adds one variable, the challenge **duration `t`**, because the
+response is not instantaneous — it develops with a fast (peripheral, τ ≈ 15 s) and a slow
+(central, τ ≈ 130 s) component, so the *effective* slope grows over the first ~5–10 min:
+
+```
+φ(t)     = f·(1 − e^(−t/τ1)) + (1 − f)·(1 − e^(−t/τ2))   (f ≈ 0.20, τ1 ≈ 15 s, τ2 ≈ 130 s)
+S_eff(t) = φ(t)·S      →   VA(PaCO2, t) = VA_base + S_eff(t)·(PaCO2 − PaCO2_base)
+```
+
+For a fixed `t` this is still linear in PaCO₂ (Model A with `S → S_eff(t)`), so it too is
+closed-form (solved by a robust bisection that also covers the `t → 0` limit). Early in a
+challenge PaCO₂ is transiently higher; by ~10 min **Model B → Model A**. Time constants from
+Cunningham et al. (1986), Swanson & Bellville (1975), Bellville et al. (1979), Dahan et al.
+(1990) and Tansley et al. (1998). Over hours–days the response acclimatises variably and is
+**not** modelled.
+
+**Validity.** Both models are for the human working range, **PaCO₂ ≤ ~80 mmHg**; above that the
+HCVR saturates and no slope is measured — use a directly measured PaCO₂. The slope `S` varies
+widely between individuals and methods (~1–6 L·min⁻¹·mmHg⁻¹) and is adjustable (default 2.69).
+
 ## Constants (defaults)
 
 | Quantity | Value | Source |
@@ -53,11 +79,13 @@ with an exact closed-form root** — no iterative solver needed.
 python fico2_paco2_converter.py -i
 ```
 
-You pick a direction and are prompted for the inputs:
+You first pick **Model A or B** (B also asks for the challenge **duration**), then a direction:
 
 - **Direction 1 (PaCO₂ → FiCO₂):** enter target PaCO₂ and baseline PaCO₂.
 - **Direction 2 (FiCO₂ → PaCO₂):** enter FiCO₂; you're asked whether you know the baseline
   PaCO₂. If not, the resting fallback (`VA_base = 4.2`, `PaCO2_base = 40`) is used.
+
+Model B prints the effective slope `S_eff(t)` and warns if the result exceeds ~80 mmHg.
 
 ### Command line (one-shot)
 
@@ -93,10 +121,23 @@ fico2_to_paco2(5.0, p)         # -> 45.15 mmHg
 fico2_to_paco2(5.0, params_resting_default())   # -> 45.17 mmHg
 ```
 
+**Model B (time-resolved):**
+
+```python
+from fico2_paco2_converter import ParamsB, fico2_to_paco2_B, paco2_to_fico2_B
+
+pB = ParamsB()                             # S=2.69, τ1=15s, τ2=130s, f=0.20, cap=80
+fico2_to_paco2_B(7.0, pB, t_s=10)          # 7% for 10 s  -> 62.4 mmHg (transient)
+fico2_to_paco2_B(7.0, pB, t_s=None)        # steady state -> 54.0 mmHg (= Model A)
+pB.S_eff(60)                               # effective slope at 1 min -> 1.32
+fico2_to_paco2_B(5.0, ParamsB(S=4.0))      # override the slope
+```
+
 ### Jupyter notebook
 
-`FiCO2_PaCO2_conversion.ipynb` walks through the derivation, both directions, a reference
-table, and a sensitivity analysis over the HCVR slope `S`.
+`FiCO2_PaCO2_conversion.ipynb` is a step-by-step tutorial: the derivation, both directions,
+the slope-`S` sensitivity, the **time-resolved Model B** with duration figures, and a
+validation against reported challenges. Full detail is in the companion technical note.
 
 ## Reference values (baseline 40 mmHg, S = 2.69)
 
@@ -119,11 +160,14 @@ python fico2_paco2_converter.py --selftest
 ## Assumptions & limitations
 
 - Ideal alveolar–arterial equilibration (PaCO₂ ≈ PACO₂ ≈ PetCO₂; healthy lungs).
-- HCVR treated as linear over the working range (≈ 40–80 mmHg).
-- A single population-mean slope `S = 2.69`; it will not match any individual — see the
-  sensitivity analysis in the notebook.
-- Published `S` are usually minute-ventilation slopes; used here for the alveolar slope,
-  valid while dead-space ventilation changes little.
+- HCVR treated as linear over the working range (≈ 40–80 mmHg); **do not apply above ~80 mmHg**
+  (the response saturates and no slope is measured — use a directly measured PaCO₂).
+- A single default slope `S = 2.69` (adjustable; reported range ~1–6) — it will not match any
+  individual, and varies with age, sex, body size, and method.
+- Model B's time constants are population means from the literature; the hours–days
+  acclimatisation regime is variable and is not modelled.
+- Not for anaesthetised subjects or non-human species without re-parameterisation (see the
+  technical note).
 
 Best used to **estimate and harmonise reported CO₂-challenge magnitudes across studies**,
 not to predict an individual subject's PaCO₂.
@@ -138,9 +182,16 @@ not to predict an individual subject's PaCO₂.
 - Lumb & Thomas (2020). *Nunn's Applied Respiratory Physiology.*
 - Read (1967). A clinical method for assessing the ventilatory response to CO₂.
   *Australas Ann Med* 16(1):20–32.
+- Bellville et al. (1979). Central and peripheral chemoreflex loop gain. *J Appl Physiol*
+  46(4):843–853. *(central time constant)*
+- Tansley et al. (1998). Human ventilatory response to 8 h of euoxic hypercapnia. *J Appl
+  Physiol* 84(2):431–434. *(fast/central components)*
+- Cunningham, Robbins & Wolff (1986). Integration of respiratory responses… *Handbook of
+  Physiology, Sect. 3, Vol. II.* *(peripheral time constant)*
 
-See `review_derivation` (simplified, fixed-slope form) and `technical_note` (reversible,
-multi-unit, adjustable slope) for the full derivation.
+The **companion technical note** gives the full, cited derivation of both models (dead-space
+basis, the two directions, the HCVR slope, time dependence and two-threshold structure, apnea
+and anaesthesia, and validation against reported challenges).
 
 ## License
 
