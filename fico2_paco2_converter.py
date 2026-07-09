@@ -197,52 +197,53 @@ def fico2_to_paco2_numeric(fico2, p: Params | None = None,
 
 
 # ==========================================================================
-# MODEL B -- nonlinear, phase- and duration-aware converter (iterative)
+# MODEL B -- time-resolved converter (duration as an explicit variable)
 # ==========================================================================
-# Model A (above) is the simple LINEAR HCVR converter for the working range
-# (~40-80 mmHg), reversible in closed form. Model B relaxes two idealisations
-# of Model A so the mapping stays sensible at higher CO2 doses and short
-# durations:
+# Model A (above) is the steady-state converter: it assumes the ventilatory
+# response to the imposed CO2 has fully developed, and is reversible in closed
+# form.  Model B adds ONE extra variable -- the duration t (seconds) of the
+# hypercapnic challenge -- because the response is not instantaneous.
 #
-#   (1) Saturating (dose) response.  The hypercapnic ventilatory response is
-#       linear (slope S2 = 2.69) only up to a break point P2; above it the
-#       response flattens -- ventilation rises with a reduced slope S3 and,
-#       at extreme CO2, is depressed by narcosis (Lambertsen, 1971; Guais et
-#       al., 2011). There is no established single "phase-3" slope in the
-#       literature (the region is a saturation, not a fixed gradient), so S3
-#       and P2 are APPROXIMATE, adjustable parameters, not physiological
-#       constants.  Because VA saturates, PaCO2 rises FASTER with FiCO2 at
-#       high dose than Model A predicts.
+# The acute response develops over a fast (peripheral, carotid-body) and a
+# slower central (medullary) component, with time constants that multiple
+# dynamic end-tidal-forcing studies place at roughly
+#       tau_fast    ~ 15 s   (Cunningham et al. 1986; Swanson & Bellville 1975)
+#       tau_central ~ 130 s  (Bellville et al. 1979; Dahan et al. 1990),
+# the fast component contributing ~12-30 % of the total (Tansley et al. 1998).
+# The fraction of the acute steady-state response present at time t is
 #
-#   (2) Duration factor phi(t).  The ventilatory response is not instantaneous:
-#       it develops over a fast (peripheral, tau~15 s) and a slower central
-#       (tau~120 s) component (Bellville et al., 1979; Tansley et al., 1998).
-#       phi(t) is the fraction of the acute steady-state response present at
-#       time t after onset; phi(inf) = 1.  Early in a challenge, ventilation
-#       has not fully risen, so PaCO2 is transiently HIGHER.
+#       phi(t) = f (1 - e^{-t/tau_fast}) + (1 - f)(1 - e^{-t/tau_central}),
 #
-# The nonlinear VA makes the reverse direction transcendental, so it is solved
-# by bracketed bisection on a monotone residual -- Model B remains fully
-# reversible, just iteratively rather than in closed form.
+# with f ~ 0.20.  phi rises from 0 to 1 over the first ~5-10 min; past that the
+# acute response is complete.  (Over hours-days the response acclimatises, but
+# that regime is variable between studies and is NOT modelled here.)
 #
-# Model B reduces exactly to Model A for PaCO2 <= P2 at steady state (t = inf).
+# The EFFECTIVE slope at time t is therefore  S_eff(t) = phi(t) * S, and the
+# ventilation is  VA(PaCO2, t) = VA_base + phi(t) * S * (PaCO2 - PaCO2_base).
+# For a FIXED t this is linear in PaCO2, so Model B is simply Model A evaluated
+# with the reduced slope S_eff(t): early in a challenge S_eff is small, less CO2
+# is offloaded, and PaCO2 is transiently higher.  Model B -> Model A as t -> inf.
+#
+# The steady-state slope S itself varies widely between individuals and method
+# (reported ~1-6 L/min/mmHg; Read 1967; Hirshman 1975); the default 2.69 is a
+# central value and is adjustable.  The model is intended for the human working
+# range: PaCO2 <= cap_paco2 (~80 mmHg); above that, use a measured PaCO2.
 
 
 @dataclass
 class ParamsB:
-    """Parameters for the nonlinear, duration-aware converter (Model B)."""
-    S2: float = 2.69           # working-range (phase-2) slope, L/min/mmHg
-    P2: float = 80.0           # break point above which the response saturates, mmHg
-    S3: float = 1.0            # high-dose (phase-3) slope, L/min/mmHg (APPROXIMATE)
+    """Parameters for the time-resolved converter (Model B)."""
+    S: float = 2.69            # steady-state HCVR slope, L/min/mmHg (range ~1-6)
     VCO2: float = 200.0        # CO2 output, mL/min STPD
     PaCO2_base: float = 40.0   # normocapnic baseline, mmHg
     VA_base: float | None = None
     Patm: float = 760.0
     PH2O: float = 47.0
     K: float = 0.863
-    tau_fast: float = 15.0     # fast/peripheral time constant, s (Tansley 1998)
-    tau_central: float = 120.0  # central time constant, s (Tansley 1998)
-    frac_fast: float = 0.25    # fraction of the acute response that is fast
+    tau_fast: float = 15.0     # peripheral time constant, s (Cunningham 1986)
+    tau_central: float = 130.0  # central time constant, s (Bellville 1979; Dahan 1990)
+    frac_fast: float = 0.20    # peripheral fraction of the acute response (Tansley 1998)
+    cap_paco2: float = 80.0    # upper validity bound for the human model, mmHg
 
     def __post_init__(self):
         if self.VA_base is None:
@@ -253,31 +254,27 @@ class ParamsB:
         return self.Patm - self.PH2O
 
     def phi(self, t_s: float | None) -> float:
-        """Fraction of the acute steady-state ventilatory response present at
-        time t_s seconds after onset.  t_s = None or inf -> 1 (steady state)."""
+        """Fraction of the acute steady-state response present at time t_s
+        seconds after onset.  t_s = None or inf -> 1 (steady state)."""
         if t_s is None or math.isinf(t_s):
             return 1.0
         return (self.frac_fast * (1.0 - math.exp(-t_s / self.tau_fast))
                 + (1.0 - self.frac_fast) * (1.0 - math.exp(-t_s / self.tau_central)))
 
-    def VA_ss(self, paco2: float) -> float:
-        """Steady-state (t -> inf) alveolar ventilation vs PaCO2: linear up to
-        P2, then a reduced slope S3 (saturating)."""
-        if paco2 <= self.P2:
-            return self.VA_base + self.S2 * (paco2 - self.PaCO2_base)
-        va_break = self.VA_base + self.S2 * (self.P2 - self.PaCO2_base)
-        return va_break + self.S3 * (paco2 - self.P2)
+    def S_eff(self, t_s: float | None) -> float:
+        """Effective HCVR slope at time t_s:  S_eff(t) = phi(t) * S."""
+        return self.phi(t_s) * self.S
 
-    def VA_eff(self, paco2: float, t_s: float | None) -> float:
-        """Ventilation actually present at time t_s (duration-scaled)."""
-        return self.VA_base + self.phi(t_s) * (self.VA_ss(paco2) - self.VA_base)
+    def VA(self, paco2: float, t_s: float | None) -> float:
+        """Alveolar ventilation present at PaCO2 and time t_s."""
+        return self.VA_base + self.S_eff(t_s) * (paco2 - self.PaCO2_base)
 
 
 def paco2_to_fico2_B(paco2_mmhg: float, p: ParamsB | None = None,
                      t_s: float | None = None, as_percent: bool = True) -> float:
-    """Model B forward (explicit): PaCO2 (+ optional duration t_s) -> FiCO2."""
+    """Model B forward (explicit): PaCO2 + duration t_s (seconds) -> FiCO2."""
     p = p or ParamsB()
-    va = p.VA_eff(paco2_mmhg, t_s)
+    va = p.VA(paco2_mmhg, t_s)
     if va <= 0:
         raise ValueError(f"Non-physical: VA <= 0 at PaCO2={paco2_mmhg}")
     pico2 = paco2_mmhg - p.K * p.VCO2 / va
@@ -287,10 +284,11 @@ def paco2_to_fico2_B(paco2_mmhg: float, p: ParamsB | None = None,
 
 def fico2_to_paco2_B(fico2, p: ParamsB | None = None, t_s: float | None = None,
                      is_percent: bool = True) -> float:
-    """Model B reverse (iterative): FiCO2 (+ optional duration t_s) -> PaCO2.
+    """Model B reverse: FiCO2 + duration t_s (seconds) -> PaCO2.
 
-    Solved by bracketed bisection; the residual is monotone increasing in
-    PaCO2, so convergence is guaranteed on the physical branch.
+    For a fixed t the model is linear in PaCO2 (slope S_eff(t) = phi(t)*S), so
+    this is solved by bracketed bisection on the monotone residual -- robust
+    even in the t -> 0 limit where S_eff -> 0 (no ventilatory response yet).
     """
     p = p or ParamsB()
     frac = fico2 / 100.0 if is_percent else float(fico2)
@@ -299,10 +297,10 @@ def fico2_to_paco2_B(fico2, p: ParamsB | None = None, t_s: float | None = None,
     pico2 = frac * p.Pdry
 
     def resid(paco2: float) -> float:
-        return paco2 - pico2 - p.K * p.VCO2 / p.VA_eff(paco2, t_s)
+        return paco2 - pico2 - p.K * p.VCO2 / p.VA(paco2, t_s)
 
     lo, hi = p.PaCO2_base, 600.0
-    if resid(lo) > 0:          # already at/above baseline solution
+    if resid(lo) > 0:
         return lo
     for _ in range(300):
         mid = 0.5 * (lo + hi)
@@ -357,65 +355,87 @@ def _ask_yes_no(prompt: str, default: bool = True) -> bool:
         print("  Please answer y or n.")
 
 
-def run_paco2_to_fico2() -> None:
-    """Direction 1: user knows a target PaCO2 (and baseline) -> estimate FiCO2."""
+def _cap_note(paco2: float) -> str:
+    return ("   [!] PaCO2 > 80 mmHg -- outside the human working range; "
+            "use a measured PaCO2." if paco2 > 80.0 else "")
+
+
+def run_paco2_to_fico2(t_s: float | None = None) -> None:
+    """Direction 1: target PaCO2 (+ baseline) -> FiCO2.  t_s given => Model B."""
     print("\n-- Estimate FiCO2 from a target PaCO2 --")
     paco2 = _ask_float("Target PaCO2 (the hypercapnic level), mmHg")
     paco2_base = _ask_float("Baseline (normocapnic) PaCO2, mmHg", default=DEFAULT_BASELINE)
-    p = params_from_baseline(paco2_base)
-    print(f"# VA_base = K*VCO2/PaCO2_base = {p.VA_base:.3f} L/min  "
-          f"(S={p.S}, VCO2={p.VCO2} mL/min)")
-    fi = paco2_to_fico2(paco2, p)
-    va_at = p.VA(paco2)
-    print(f"\n  PaCO2 = {paco2:.2f} mmHg ({mmhg_to_kpa(paco2):.3f} kPa)")
-    print(f"  baseline PaCO2 = {paco2_base:.2f} mmHg")
-    print(f"  VA at hypercapnia = {va_at:.3f} L/min")
-    print(f"  ->  FiCO2 = {fi:.3f} %  (PICO2 = {fi/100*p.Pdry:.2f} mmHg)")
+    if t_s is None:
+        p = params_from_baseline(paco2_base)
+        fi, va, seff = paco2_to_fico2(paco2, p), p.VA(paco2), p.S
+    else:
+        p = ParamsB(PaCO2_base=paco2_base)
+        fi, va, seff = paco2_to_fico2_B(paco2, p, t_s=t_s), p.VA(paco2, t_s), p.S_eff(t_s)
+    print(f"\n  PaCO2 = {paco2:.2f} mmHg ({mmhg_to_kpa(paco2):.3f} kPa), baseline {paco2_base:.0f}")
+    print(f"  effective slope S_eff = {seff:.2f} L/min/mmHg ;  VA = {va:.2f} L/min")
+    print(f"  ->  FiCO2 = {fi:.3f} %  (PICO2 = {fi/100*(p.Patm-p.PH2O):.1f} mmHg)")
+    if _cap_note(paco2):
+        print(_cap_note(paco2))
 
 
-def run_fico2_to_paco2() -> None:
-    """Direction 2: user knows FiCO2 -> estimate PaCO2.
-
-    Two sub-cases:
-      * baseline known  -> VA_base self-consistent (K*VCO2/PaCO2_base)
-      * baseline unknown -> PaCO2_base = 40, VA_base = 4.2 L/min (literature rest)
-    """
+def run_fico2_to_paco2(t_s: float | None = None) -> None:
+    """Direction 2: FiCO2 (+ baseline) -> PaCO2.  t_s given => Model B."""
     print("\n-- Estimate PaCO2 from a given FiCO2 --")
     fico2 = _ask_float("Inspired CO2, FiCO2 (percent, e.g. 5)")
     knows_base = _ask_yes_no("Do you know the subject's baseline (normocapnic) PaCO2?",
                              default=False)
-    if knows_base:
-        paco2_base = _ask_float("Baseline PaCO2, mmHg", default=DEFAULT_BASELINE)
-        p = params_from_baseline(paco2_base)
-        note = (f"# baseline known -> VA_base = K*VCO2/PaCO2_base = "
-                f"{p.VA_base:.3f} L/min (self-consistent)")
+    base = _ask_float("Baseline PaCO2, mmHg", default=DEFAULT_BASELINE) if knows_base else DEFAULT_BASELINE
+    if t_s is None:
+        p = params_from_baseline(base) if knows_base else params_resting_default()
+        pa, seff = fico2_to_paco2(fico2, p), p.S
+        va = p.VA(pa)
     else:
-        p = params_resting_default()
-        note = (f"# baseline unknown -> assume PaCO2_base = {p.PaCO2_base:.0f} mmHg, "
-                f"VA_base = {p.VA_base:.1f} L/min (West/Nunn's resting VA)")
-    print(note)
-    pa = fico2_to_paco2(fico2, p)
-    print(f"\n  FiCO2 = {fico2:.3f} %  (PICO2 = {fico2/100*p.Pdry:.2f} mmHg)")
-    print(f"  VA at hypercapnia = {p.VA(pa):.3f} L/min")
+        p = ParamsB(PaCO2_base=base)
+        if not knows_base:
+            p.VA_base = VA_REST      # literature resting VA when baseline unknown
+        pa, seff = fico2_to_paco2_B(fico2, p, t_s=t_s), p.S_eff(t_s)
+        va = p.VA(pa, t_s)
+    print(f"\n  FiCO2 = {fico2:.3f} %  (PICO2 = {fico2/100*(p.Patm-p.PH2O):.1f} mmHg)")
+    print(f"  effective slope S_eff = {seff:.2f} L/min/mmHg ;  VA = {va:.2f} L/min")
     print(f"  ->  PaCO2 = {pa:.2f} mmHg = {mmhg_to_kpa(pa):.3f} kPa  "
-          f"(rise of {pa - p.PaCO2_base:+.2f} mmHg from baseline)")
+          f"(rise of {pa - base:+.2f} mmHg from baseline)")
+    if _cap_note(pa):
+        print(_cap_note(pa))
 
 
 def interactive() -> None:
-    """Top-level interactive menu."""
-    print("=" * 66)
-    print(" FiCO2 <-> PaCO2 converter  (simplified HCVR, S = 2.69)")
-    print("=" * 66)
-    print(" What do you know / want?")
+    """Top-level interactive menu (choose Model A or B, then a direction)."""
+    print("=" * 68)
+    print(" FiCO2 <-> PaCO2 converter")
+    print("=" * 68)
+    print(" Which model?")
+    print("   A) steady state   -- response fully developed; closed form (default S=2.69)")
+    print("   B) time-resolved  -- you also give the challenge DURATION; uses S_eff(t)=phi(t)*S")
+    t_s = None
+    while True:
+        m = input(" Enter A or B (q to quit): ").strip().lower()
+        if m in ("q", "quit", "exit"):
+            return
+        if m in ("a", "b"):
+            break
+        print("  Please type A or B.")
+    if m == "b":
+        mins = _ask_float("Challenge duration so far, minutes", default=5.0)
+        t_s = mins * 60.0
+        pb = ParamsB()
+        print(f"# Model B: at t = {mins:g} min, phi = {pb.phi(t_s):.3f} -> "
+              f"S_eff = {pb.S_eff(t_s):.2f} L/min/mmHg (steady-state S = {pb.S})")
+
+    print("\n What do you know / want?")
     print("   1) I have a target PaCO2  ->  estimate FiCO2")
     print("   2) I have an inspired FiCO2  ->  estimate PaCO2")
     while True:
         choice = input(" Enter 1 or 2 (q to quit): ").strip().lower()
         if choice == "1":
-            run_paco2_to_fico2()
+            run_paco2_to_fico2(t_s)
             return
         if choice == "2":
-            run_fico2_to_paco2()
+            run_fico2_to_paco2(t_s)
             return
         if choice in ("q", "quit", "exit"):
             return
