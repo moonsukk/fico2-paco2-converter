@@ -196,6 +196,126 @@ def fico2_to_paco2_numeric(fico2, p: Params | None = None,
     return 0.5 * (lo + hi)
 
 
+# ==========================================================================
+# MODEL B -- nonlinear, phase- and duration-aware converter (iterative)
+# ==========================================================================
+# Model A (above) is the simple LINEAR HCVR converter for the working range
+# (~40-80 mmHg), reversible in closed form. Model B relaxes two idealisations
+# of Model A so the mapping stays sensible at higher CO2 doses and short
+# durations:
+#
+#   (1) Saturating (dose) response.  The hypercapnic ventilatory response is
+#       linear (slope S2 = 2.69) only up to a break point P2; above it the
+#       response flattens -- ventilation rises with a reduced slope S3 and,
+#       at extreme CO2, is depressed by narcosis (Lambertsen, 1971; Guais et
+#       al., 2011). There is no established single "phase-3" slope in the
+#       literature (the region is a saturation, not a fixed gradient), so S3
+#       and P2 are APPROXIMATE, adjustable parameters, not physiological
+#       constants.  Because VA saturates, PaCO2 rises FASTER with FiCO2 at
+#       high dose than Model A predicts.
+#
+#   (2) Duration factor phi(t).  The ventilatory response is not instantaneous:
+#       it develops over a fast (peripheral, tau~15 s) and a slower central
+#       (tau~120 s) component (Bellville et al., 1979; Tansley et al., 1998).
+#       phi(t) is the fraction of the acute steady-state response present at
+#       time t after onset; phi(inf) = 1.  Early in a challenge, ventilation
+#       has not fully risen, so PaCO2 is transiently HIGHER.
+#
+# The nonlinear VA makes the reverse direction transcendental, so it is solved
+# by bracketed bisection on a monotone residual -- Model B remains fully
+# reversible, just iteratively rather than in closed form.
+#
+# Model B reduces exactly to Model A for PaCO2 <= P2 at steady state (t = inf).
+
+
+@dataclass
+class ParamsB:
+    """Parameters for the nonlinear, duration-aware converter (Model B)."""
+    S2: float = 2.69           # working-range (phase-2) slope, L/min/mmHg
+    P2: float = 80.0           # break point above which the response saturates, mmHg
+    S3: float = 1.0            # high-dose (phase-3) slope, L/min/mmHg (APPROXIMATE)
+    VCO2: float = 200.0        # CO2 output, mL/min STPD
+    PaCO2_base: float = 40.0   # normocapnic baseline, mmHg
+    VA_base: float | None = None
+    Patm: float = 760.0
+    PH2O: float = 47.0
+    K: float = 0.863
+    tau_fast: float = 15.0     # fast/peripheral time constant, s (Tansley 1998)
+    tau_central: float = 120.0  # central time constant, s (Tansley 1998)
+    frac_fast: float = 0.25    # fraction of the acute response that is fast
+
+    def __post_init__(self):
+        if self.VA_base is None:
+            self.VA_base = self.K * self.VCO2 / self.PaCO2_base
+
+    @property
+    def Pdry(self) -> float:
+        return self.Patm - self.PH2O
+
+    def phi(self, t_s: float | None) -> float:
+        """Fraction of the acute steady-state ventilatory response present at
+        time t_s seconds after onset.  t_s = None or inf -> 1 (steady state)."""
+        if t_s is None or math.isinf(t_s):
+            return 1.0
+        return (self.frac_fast * (1.0 - math.exp(-t_s / self.tau_fast))
+                + (1.0 - self.frac_fast) * (1.0 - math.exp(-t_s / self.tau_central)))
+
+    def VA_ss(self, paco2: float) -> float:
+        """Steady-state (t -> inf) alveolar ventilation vs PaCO2: linear up to
+        P2, then a reduced slope S3 (saturating)."""
+        if paco2 <= self.P2:
+            return self.VA_base + self.S2 * (paco2 - self.PaCO2_base)
+        va_break = self.VA_base + self.S2 * (self.P2 - self.PaCO2_base)
+        return va_break + self.S3 * (paco2 - self.P2)
+
+    def VA_eff(self, paco2: float, t_s: float | None) -> float:
+        """Ventilation actually present at time t_s (duration-scaled)."""
+        return self.VA_base + self.phi(t_s) * (self.VA_ss(paco2) - self.VA_base)
+
+
+def paco2_to_fico2_B(paco2_mmhg: float, p: ParamsB | None = None,
+                     t_s: float | None = None, as_percent: bool = True) -> float:
+    """Model B forward (explicit): PaCO2 (+ optional duration t_s) -> FiCO2."""
+    p = p or ParamsB()
+    va = p.VA_eff(paco2_mmhg, t_s)
+    if va <= 0:
+        raise ValueError(f"Non-physical: VA <= 0 at PaCO2={paco2_mmhg}")
+    pico2 = paco2_mmhg - p.K * p.VCO2 / va
+    fico2 = pico2 / p.Pdry
+    return fico2 * 100.0 if as_percent else fico2
+
+
+def fico2_to_paco2_B(fico2, p: ParamsB | None = None, t_s: float | None = None,
+                     is_percent: bool = True) -> float:
+    """Model B reverse (iterative): FiCO2 (+ optional duration t_s) -> PaCO2.
+
+    Solved by bracketed bisection; the residual is monotone increasing in
+    PaCO2, so convergence is guaranteed on the physical branch.
+    """
+    p = p or ParamsB()
+    frac = fico2 / 100.0 if is_percent else float(fico2)
+    if frac < 0:
+        raise ValueError("FiCO2 cannot be negative.")
+    pico2 = frac * p.Pdry
+
+    def resid(paco2: float) -> float:
+        return paco2 - pico2 - p.K * p.VCO2 / p.VA_eff(paco2, t_s)
+
+    lo, hi = p.PaCO2_base, 600.0
+    if resid(lo) > 0:          # already at/above baseline solution
+        return lo
+    for _ in range(300):
+        mid = 0.5 * (lo + hi)
+        fm = resid(mid)
+        if abs(fm) < 1e-9:
+            return mid
+        if fm < 0:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 # --------------------------------------------------------------------------
 # Convenience unit helpers
 # --------------------------------------------------------------------------

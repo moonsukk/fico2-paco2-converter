@@ -85,6 +85,48 @@ def test_negative_fico2_raises():
     raise AssertionError("negative FiCO2 should raise ValueError")
 
 
+
+
+# ---- Model B (nonlinear, duration-aware) --------------------------------
+from fico2_paco2_converter import (  # noqa: E402
+    ParamsB, fico2_to_paco2_B, paco2_to_fico2_B,
+)
+
+
+def test_modelB_reduces_to_A_in_working_range():
+    """At steady state and PaCO2 <= P2, Model B == Model A."""
+    pA = params_from_baseline(40.0)
+    pB = ParamsB()
+    for fi in (0.0, 2.0, 5.0, 7.0):
+        assert abs(fico2_to_paco2_B(fi, pB) - fico2_to_paco2(fi, pA)) < 1e-6
+
+
+def test_modelB_duration_raises_paco2():
+    """Shorter duration -> less ventilation -> higher PaCO2."""
+    pB = ParamsB()
+    pa_10s = fico2_to_paco2_B(7.0, pB, t_s=10)
+    pa_ss = fico2_to_paco2_B(7.0, pB, t_s=None)
+    assert pa_10s > pa_ss > 40.0
+    # monotone in time
+    seq = [fico2_to_paco2_B(7.0, pB, t_s=t) for t in (5, 30, 120, 600)]
+    assert all(a >= b for a, b in zip(seq, seq[1:]))
+
+
+def test_modelB_roundtrip():
+    """Reverse (iterative) then forward recovers the input at any duration."""
+    pB = ParamsB()
+    for fi in (5.0, 12.0, 25.0):
+        for t in (30, None):
+            pa = fico2_to_paco2_B(fi, pB, t_s=t)
+            assert abs(paco2_to_fico2_B(pa, pB, t_s=t) - fi) < 1e-4
+
+
+def test_modelB_phi_bounds():
+    """Duration factor is 0<phi<=1 and ->1 as t->inf."""
+    pB = ParamsB()
+    assert 0 < pB.phi(1) < pB.phi(100) < 1
+    assert abs(pB.phi(float('inf')) - 1.0) < 1e-12
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
