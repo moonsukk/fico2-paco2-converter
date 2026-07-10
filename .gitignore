@@ -15,3 +15,6 @@ env/
 *.swp
 .idea/
 .vscode/
+
+# Local session handoff (do not publish)
+CLAUDE.md
