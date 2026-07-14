@@ -26,22 +26,22 @@ with an exact closed-form root** — no iterative solver needed.
 
 ## Two models
 
-**Model A — steady-state (default).** Assumes the ventilatory response has fully developed.
+**Steady-state model (default).** Assumes the ventilatory response has fully developed.
 Linear HCVR, reversible in closed form. Use for typical human challenges held long enough to
 equilibrate (minutes).
 
-**Model B — time-resolved.** Adds one variable, the challenge **duration `t`**, because the
-response is not instantaneous — it develops with a fast (peripheral, τ ≈ 15 s) and a slow
-(central, τ ≈ 130 s) component, so the *effective* slope grows over the first ~5–10 min:
+**Time-dependent model.** Adds one variable, the challenge **duration `t`**, because the
+response is not instantaneous — it develops with a fast (peripheral, τ ≈ 12.3 s) and a slow
+(central, τ ≈ 156 s) component, so the *effective* slope grows over the first ~5–10 min:
 
 ```
-φ(t)     = f·(1 − e^(−t/τ1)) + (1 − f)·(1 − e^(−t/τ2))   (f ≈ 0.20, τ1 ≈ 15 s, τ2 ≈ 130 s)
+φ(t)     = f·(1 − e^(−t/τ1)) + (1 − f)·(1 − e^(−t/τ2))   (f = 0.32, τ1 = 12.3 s, τ2 = 156 s)
 S_eff(t) = φ(t)·S      →   VA(PaCO2, t) = VA_base + S_eff(t)·(PaCO2 − PaCO2_base)
 ```
 
-For a fixed `t` this is still linear in PaCO₂ (Model A with `S → S_eff(t)`), so it too is
+For a fixed `t` this is still linear in PaCO₂ (the steady-state model with `S → S_eff(t)`), so it too is
 closed-form (solved by a robust bisection that also covers the `t → 0` limit). Early in a
-challenge PaCO₂ is transiently higher; by ~10 min **Model B → Model A**. Time constants from
+challenge PaCO₂ is transiently higher; by ~10 min the two models coincide. Time constants from
 Cunningham et al. (1986), Swanson & Bellville (1975), Bellville et al. (1979), Dahan et al.
 (1990) and Tansley et al. (1998). Over hours–days the response acclimatises variably and is
 **not** modelled.
@@ -61,7 +61,7 @@ widely between individuals and methods (~1–6 L·min⁻¹·mmHg⁻¹) and is ad
 | `PaCO2_base` | 40 mmHg | normocapnic resting baseline |
 | `VA_base` (self-consistent) | ≈ 4.3 L·min⁻¹ | `K·VCO2 / PaCO2_base` |
 | `VA_REST` (fallback) | **4.2 L·min⁻¹** | literature resting alveolar ventilation (West; Nunn's) |
-| `S` | 2.69 L·min⁻¹·mmHg⁻¹ | mean HCVR slope (Hirshman et al., 1975; range 1.16–5.95) |
+| `S` | 2.69 L·min⁻¹·mmHg⁻¹ | mean HCVR slope (Hirshman et al., 1975, n = 44; individual range 1.00–5.95) |
 
 ## How the baseline / V̇A_base is chosen
 
@@ -79,13 +79,13 @@ widely between individuals and methods (~1–6 L·min⁻¹·mmHg⁻¹) and is ad
 python fico2_paco2_converter.py -i
 ```
 
-You first pick **Model A or B** (B also asks for the challenge **duration**), then a direction:
+You first pick the **steady-state** or **time-dependent** model (the latter also asks for the challenge **duration**), then a direction:
 
 - **Direction 1 (PaCO₂ → FiCO₂):** enter target PaCO₂ and baseline PaCO₂.
 - **Direction 2 (FiCO₂ → PaCO₂):** enter FiCO₂; you're asked whether you know the baseline
   PaCO₂. If not, the resting fallback (`VA_base = 4.2`, `PaCO2_base = 40`) is used.
 
-Model B prints the effective slope `S_eff(t)` and warns if the result exceeds ~80 mmHg.
+The time-dependent model prints the effective slope `S_eff(t)` and warns if the result exceeds ~80 mmHg.
 
 ### Command line (one-shot)
 
@@ -121,14 +121,14 @@ fico2_to_paco2(5.0, p)         # -> 45.15 mmHg
 fico2_to_paco2(5.0, params_resting_default())   # -> 45.17 mmHg
 ```
 
-**Model B (time-resolved):**
+**Time-dependent model:**
 
 ```python
 from fico2_paco2_converter import ParamsB, fico2_to_paco2_B, paco2_to_fico2_B
 
-pB = ParamsB()                             # S=2.69, τ1=15s, τ2=130s, f=0.20, cap=80
+pB = ParamsB()                             # S=2.69, τ1=12.3s, τ2=156s, f=0.32, cap=80
 fico2_to_paco2_B(7.0, pB, t_s=10)          # 7% for 10 s  -> 62.4 mmHg (transient)
-fico2_to_paco2_B(7.0, pB, t_s=None)        # steady state -> 54.0 mmHg (= Model A)
+fico2_to_paco2_B(7.0, pB, t_s=None)        # steady state -> 54.0 mmHg (= steady-state model)
 pB.S_eff(60)                               # effective slope at 1 min -> 1.32
 fico2_to_paco2_B(5.0, ParamsB(S=4.0))      # override the slope
 ```
@@ -136,7 +136,7 @@ fico2_to_paco2_B(5.0, ParamsB(S=4.0))      # override the slope
 ### Jupyter notebook
 
 `FiCO2_PaCO2_conversion.ipynb` is a step-by-step tutorial: the derivation, both directions,
-the slope-`S` sensitivity, the **time-resolved Model B** with duration figures, and a
+the slope-`S` sensitivity, the **time-dependent model** with duration figures, and a
 validation against reported challenges. Full detail is in the companion technical note.
 
 ## Reference values (baseline 40 mmHg, S = 2.69)
@@ -164,7 +164,8 @@ python fico2_paco2_converter.py --selftest
   (the response saturates and no slope is measured — use a directly measured PaCO₂).
 - A single default slope `S = 2.69` (adjustable; reported range ~1–6) — it will not match any
   individual, and varies with age, sex, body size, and method.
-- Model B's time constants are population means from the literature; the hours–days
+- The time-dependent model's time constants are subject-weighted means from three human
+  step-hypercapnia studies (Swanson & Bellville 1975; Bellville et al. 1979; Dahan et al. 1990); the hours–days
   acclimatisation regime is variable and is not modelled.
 - Not for anaesthetised subjects or non-human species without re-parameterisation (see the
   technical note).

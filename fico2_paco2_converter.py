@@ -6,7 +6,7 @@ fico2_paco2_converter.py
 Reversible conversion between inspired CO2 fraction (FiCO2) and arterial /
 end-tidal CO2 partial pressure (PaCO2 = PetCO2), using the *simplified*
 hypercapnic-ventilatory-response (HCVR) method with a single fixed slope
-S = 2.69 L.min^-1.mmHg^-1  (Hirshman et al. 1975: mean 2.69 +/- 0.19).
+S = 2.69 L.min^-1.mmHg^-1  (Hirshman et al. 1975: mean 2.69 +/- 0.19 SEM, n = 44; individual range 1.00-5.95).
 
 Assumption: PaCO2 = PetCO2 = P_ACO2 (ideal alveolar / arterial equilibration).
 
@@ -197,52 +197,71 @@ def fico2_to_paco2_numeric(fico2, p: Params | None = None,
 
 
 # ==========================================================================
-# MODEL B -- time-resolved converter (duration as an explicit variable)
+# TIME-DEPENDENT MODEL  (duration as an explicit variable)
 # ==========================================================================
-# Model A (above) is the steady-state converter: it assumes the ventilatory
-# response to the imposed CO2 has fully developed, and is reversible in closed
-# form.  Model B adds ONE extra variable -- the duration t (seconds) of the
-# hypercapnic challenge -- because the response is not instantaneous.
+# The steady-state model (above) assumes the ventilatory response to the
+# imposed CO2 has fully developed.  The time-dependent model adds ONE extra
+# variable -- the duration t (seconds) of the hypercapnic challenge -- because
+# the response is not instantaneous.
 #
-# The acute response develops over a fast (peripheral, carotid-body) and a
-# slower central (medullary) component, with time constants that multiple
-# dynamic end-tidal-forcing studies place at roughly
-#       tau_fast    ~ 15 s   (Cunningham et al. 1986; Swanson & Bellville 1975)
-#       tau_central ~ 130 s  (Bellville et al. 1979; Dahan et al. 1990),
-# the fast component contributing ~12-30 % of the total (Tansley et al. 1998).
+# The acute response develops through a fast (peripheral, carotid-body) and a
+# slower central (medullary) component.  THREE studies report both time
+# constants in normoxic / euoxic humans during step hypercapnia:
+#
+#   study                        n    tau_fast     tau_central    f (peripheral share)
+#   ---------------------------  ---  -----------  -------------  --------------------
+#   Swanson & Bellville (1975)    1   17.5 s       75.0 s         ~0.50
+#   Bellville et al.   (1979)     7   14.8+-11.1s  180.1+-96.0 s  0.34   (g2/(g1+g2))
+#   Dahan et al.       (1990)     9    9.8+- 3.5s  146.6+-48.8 s  0.30   (Gp/(Gc+Gp))
+#
+# Weighting each study by its number of subjects gives the defaults used here:
+#
+#       tau_fast    = 12.3 s      tau_central = 156.2 s      f = 0.32
+#
+# Both lie inside the ranges of 8-26 s and 65-180 s summarised by Tansley et
+# al. (1998), and tau_fast agrees with the ~15 s adopted by Cunningham et al.
+# (1986).  The three source studies used an effectively common CO2 dose: their
+# end-tidal steps of +7 to +9 mmHg correspond, via the steady-state model, to
+# an equivalent inspired fraction of 5.4-6.0% CO2.
+#
 # The fraction of the acute steady-state response present at time t is
 #
 #       phi(t) = f (1 - e^{-t/tau_fast}) + (1 - f)(1 - e^{-t/tau_central}),
 #
-# with f ~ 0.20.  phi rises from 0 to 1 over the first ~5-10 min; past that the
-# acute response is complete.  (Over hours-days the response acclimatises, but
-# that regime is variable between studies and is NOT modelled here.)
+# rising from 0 to 1 over the first ~5-10 min.  (Over hours-days the response
+# acclimatises, but that regime is variable between studies and is NOT
+# modelled here.)
 #
-# The EFFECTIVE slope at time t is therefore  S_eff(t) = phi(t) * S, and the
-# ventilation is  VA(PaCO2, t) = VA_base + phi(t) * S * (PaCO2 - PaCO2_base).
-# For a FIXED t this is linear in PaCO2, so Model B is simply Model A evaluated
-# with the reduced slope S_eff(t): early in a challenge S_eff is small, less CO2
-# is offloaded, and PaCO2 is transiently higher.  Model B -> Model A as t -> inf.
+# The EFFECTIVE slope at time t is  S_eff(t) = phi(t) * S, and ventilation is
+#   VA(PaCO2, t) = VA_base + phi(t) * S * (PaCO2 - PaCO2_base).
+# For a FIXED t this is linear in PaCO2, so the time-dependent model is simply
+# the steady-state model evaluated with the reduced slope S_eff(t): early in a
+# challenge S_eff is small, less CO2 is offloaded, and PaCO2 is transiently
+# higher.  It converges to the steady-state model as t -> inf.
 #
 # The steady-state slope S itself varies widely between individuals and method
-# (reported ~1-6 L/min/mmHg; Read 1967; Hirshman 1975); the default 2.69 is a
-# central value and is adjustable.  The model is intended for the human working
-# range: PaCO2 <= cap_paco2 (~80 mmHg); above that, use a measured PaCO2.
+# (reported ~1-6 L/min/mmHg; Read 1967; Hirshman 1975 give 1.00-5.95); the
+# default 2.69 is the population mean and is adjustable.  The model is intended
+# for the human working range: PaCO2 <= cap_paco2 (~80 mmHg); above that, use a
+# measured PaCO2.
 
 
 @dataclass
 class ParamsB:
-    """Parameters for the time-resolved converter (Model B)."""
-    S: float = 2.69            # steady-state HCVR slope, L/min/mmHg (range ~1-6)
+    """Parameters for the time-dependent converter."""
+    S: float = 2.69            # steady-state HCVR slope, L/min/mmHg (reported 1.00-5.95)
     VCO2: float = 200.0        # CO2 output, mL/min STPD
     PaCO2_base: float = 40.0   # normocapnic baseline, mmHg
     VA_base: float | None = None
     Patm: float = 760.0
     PH2O: float = 47.0
     K: float = 0.863
-    tau_fast: float = 15.0     # peripheral time constant, s (Cunningham 1986)
-    tau_central: float = 130.0  # central time constant, s (Bellville 1979; Dahan 1990)
-    frac_fast: float = 0.20    # peripheral fraction of the acute response (Tansley 1998)
+    tau_fast: float = 12.3     # peripheral time constant, s  (subject-weighted mean of
+                               #   Swanson 1975 17.5 / Bellville 1979 14.8 / Dahan 1990 9.8)
+    tau_central: float = 156.2  # central time constant, s   (subject-weighted mean of
+                               #   Swanson 1975 75 / Bellville 1979 180.1 / Dahan 1990 146.6)
+    frac_fast: float = 0.32    # peripheral share of the steady-state response (subject-weighted
+                               #   mean of Bellville 1979 0.34 and Dahan 1990 0.30)
     cap_paco2: float = 80.0    # upper validity bound for the human model, mmHg
 
     def __post_init__(self):
@@ -272,7 +291,7 @@ class ParamsB:
 
 def paco2_to_fico2_B(paco2_mmhg: float, p: ParamsB | None = None,
                      t_s: float | None = None, as_percent: bool = True) -> float:
-    """Model B forward (explicit): PaCO2 + duration t_s (seconds) -> FiCO2."""
+    """Time-dependent forward (explicit): PaCO2 + duration t_s (s) -> FiCO2."""
     p = p or ParamsB()
     va = p.VA(paco2_mmhg, t_s)
     if va <= 0:
@@ -284,7 +303,7 @@ def paco2_to_fico2_B(paco2_mmhg: float, p: ParamsB | None = None,
 
 def fico2_to_paco2_B(fico2, p: ParamsB | None = None, t_s: float | None = None,
                      is_percent: bool = True) -> float:
-    """Model B reverse: FiCO2 + duration t_s (seconds) -> PaCO2.
+    """Time-dependent reverse: FiCO2 + duration t_s (seconds) -> PaCO2.
 
     For a fixed t the model is linear in PaCO2 (slope S_eff(t) = phi(t)*S), so
     this is solved by bracketed bisection on the monotone residual -- robust
@@ -361,7 +380,7 @@ def _cap_note(paco2: float) -> str:
 
 
 def run_paco2_to_fico2(t_s: float | None = None) -> None:
-    """Direction 1: target PaCO2 (+ baseline) -> FiCO2.  t_s given => Model B."""
+    """Direction 1: target PaCO2 (+ baseline) -> FiCO2.  t_s given => time-dependent."""
     print("\n-- Estimate FiCO2 from a target PaCO2 --")
     paco2 = _ask_float("Target PaCO2 (the hypercapnic level), mmHg")
     paco2_base = _ask_float("Baseline (normocapnic) PaCO2, mmHg", default=DEFAULT_BASELINE)
@@ -379,7 +398,7 @@ def run_paco2_to_fico2(t_s: float | None = None) -> None:
 
 
 def run_fico2_to_paco2(t_s: float | None = None) -> None:
-    """Direction 2: FiCO2 (+ baseline) -> PaCO2.  t_s given => Model B."""
+    """Direction 2: FiCO2 (+ baseline) -> PaCO2.  t_s given => time-dependent."""
     print("\n-- Estimate PaCO2 from a given FiCO2 --")
     fico2 = _ask_float("Inspired CO2, FiCO2 (percent, e.g. 5)")
     knows_base = _ask_yes_no("Do you know the subject's baseline (normocapnic) PaCO2?",
@@ -404,26 +423,26 @@ def run_fico2_to_paco2(t_s: float | None = None) -> None:
 
 
 def interactive() -> None:
-    """Top-level interactive menu (choose Model A or B, then a direction)."""
+    """Top-level interactive menu (choose the model, then a direction)."""
     print("=" * 68)
     print(" FiCO2 <-> PaCO2 converter")
     print("=" * 68)
     print(" Which model?")
-    print("   A) steady state   -- response fully developed; closed form (default S=2.69)")
-    print("   B) time-resolved  -- you also give the challenge DURATION; uses S_eff(t)=phi(t)*S")
+    print("   S) steady-state    -- response fully developed; closed form (default S=2.69)")
+    print("   T) time-dependent  -- you also give the challenge DURATION; uses S_eff(t)=phi(t)*S")
     t_s = None
     while True:
-        m = input(" Enter A or B (q to quit): ").strip().lower()
+        m = input(" Enter S or T (q to quit): ").strip().lower()
         if m in ("q", "quit", "exit"):
             return
-        if m in ("a", "b"):
+        if m in ("s", "t", "a", "b"):   # a/b accepted for backwards compatibility
             break
-        print("  Please type A or B.")
-    if m == "b":
+        print("  Please type S or T.")
+    if m in ("t", "b"):
         mins = _ask_float("Challenge duration so far, minutes", default=5.0)
         t_s = mins * 60.0
         pb = ParamsB()
-        print(f"# Model B: at t = {mins:g} min, phi = {pb.phi(t_s):.3f} -> "
+        print(f"# time-dependent: at t = {mins:g} min, phi = {pb.phi(t_s):.3f} -> "
               f"S_eff = {pb.S_eff(t_s):.2f} L/min/mmHg (steady-state S = {pb.S})")
 
     print("\n What do you know / want?")
@@ -545,3 +564,13 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# --------------------------------------------------------------------------
+# Preferred names (the note calls these the steady-state and time-dependent
+# models).  The older Model A / Model B names are kept as aliases.
+# --------------------------------------------------------------------------
+ParamsSteadyState = Params
+ParamsTimeDependent = ParamsB
+paco2_to_fico2_timedep = paco2_to_fico2_B
+fico2_to_paco2_timedep = fico2_to_paco2_B
