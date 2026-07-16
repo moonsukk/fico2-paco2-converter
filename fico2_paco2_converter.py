@@ -205,24 +205,26 @@ def fico2_to_paco2_numeric(fico2, p: Params | None = None,
 # the response is not instantaneous.
 #
 # The acute response develops through a fast (peripheral, carotid-body) and a
-# slower central (medullary) component.  THREE studies report both time
-# constants in normoxic / euoxic humans during step hypercapnia:
+# slower central (medullary) component.  FIVE studies report both time
+# constants in normoxic humans during step hypercapnia:
 #
 #   study                        n    tau_fast     tau_central    f (peripheral share)
 #   ---------------------------  ---  -----------  -------------  --------------------
 #   Swanson & Bellville (1975)    1   17.5 s       75.0 s         ~0.50
+#   Ward & Bellville   (1983)     6    5.7 s        72.0 s         0.29   (g2/(g1+g2))
 #   Bellville et al.   (1979)     7   14.8+-11.1s  180.1+-96.0 s  0.34   (g2/(g1+g2))
 #   Dahan et al.       (1990)     9    9.8+- 3.5s  146.6+-48.8 s  0.30   (Gp/(Gc+Gp))
+#   Berkenbosch et al. (1992)    10    7.6 s       127.5 s        0.26   (Sp/(Sc+Sp))
 #
 # Weighting each study by its number of subjects gives the defaults used here:
 #
-#       tau_fast    = 12.3 s      tau_central = 156.2 s      f = 0.32
+#       tau_fast    = 9.7 s       tau_central = 132.2 s      f = 0.295
 #
 # Both lie inside the ranges of 8-26 s and 65-180 s summarised by Tansley et
 # al. (1998), and tau_fast agrees with the ~15 s adopted by Cunningham et al.
-# (1986).  The three source studies used an effectively common CO2 dose: their
-# end-tidal steps of +7 to +9 mmHg correspond, via the steady-state model, to
-# an equivalent inspired fraction of 5.4-6.0% CO2.
+# (1986).  The five source studies used comparable CO2 doses: their end-tidal
+# steps of +7 to +11 mmHg correspond, via the steady-state model, to an
+# equivalent inspired fraction of ~5-7% CO2.
 #
 # The fraction of the acute steady-state response present at time t is
 #
@@ -256,12 +258,15 @@ class ParamsB:
     Patm: float = 760.0
     PH2O: float = 47.0
     K: float = 0.863
-    tau_fast: float = 12.3     # peripheral time constant, s  (subject-weighted mean of
-                               #   Swanson 1975 17.5 / Bellville 1979 14.8 / Dahan 1990 9.8)
-    tau_central: float = 156.2  # central time constant, s   (subject-weighted mean of
-                               #   Swanson 1975 75 / Bellville 1979 180.1 / Dahan 1990 146.6)
-    frac_fast: float = 0.32    # peripheral share of the steady-state response (subject-weighted
-                               #   mean of Bellville 1979 0.34 and Dahan 1990 0.30)
+    tau_fast: float = 9.7      # peripheral time constant, s  (subject-weighted mean of Swanson
+                               #   1975 17.5 / Ward-Bellville 1983 5.7 / Bellville 1979 14.8 /
+                               #   Dahan 1990 9.8 / Berkenbosch 1992 7.6; n = 33)
+    tau_central: float = 132.2  # central time constant, s   (subject-weighted mean of Swanson
+                               #   1975 75 / Ward-Bellville 1983 72 / Bellville 1979 180.1 /
+                               #   Dahan 1990 146.6 / Berkenbosch 1992 127.5; n = 33)
+    frac_fast: float = 0.295   # peripheral share of the steady-state response (subject-weighted
+                               #   mean of Bellville 1979 0.34, Dahan 1990 0.30, Ward-Bellville
+                               #   1983 0.29, Berkenbosch 1992 0.26; n = 32)
     cap_paco2: float = 80.0    # upper validity bound for the human model, mmHg
 
     def __post_init__(self):
