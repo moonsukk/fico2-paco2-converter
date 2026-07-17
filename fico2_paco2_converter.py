@@ -39,12 +39,11 @@ How VA_base is chosen (matches the two "currencies" seen in the literature):
     self-consistency,  VA_base = K*VCO2/PaCO2_base, so that FiCO2 = 0 returns
     the baseline exactly.
   * If only FiCO2 is known (no baseline), we fall back to PaCO2_base = 40 mmHg
-    together with the *literature resting alveolar ventilation* VA_base = 4.2
-    L/min (West, Respiratory Physiology; Nunn's Applied Respiratory
-    Physiology: "typical resting values might be ~4 L/min for alveolar
-    ventilation"). These two are not perfectly self-consistent, but the steep
-    HCVR feedback absorbs the small VA_base difference, so FiCO2 = 0 returns
-    ~40.04 mmHg -- a negligible <0.1 mmHg offset from the assumed 40.
+    together with a resting alveolar ventilation VA_base = 4.3 L/min -- the
+    value implied by the same VCO2 = 200 and PaCO2_base = 40 (K*VCO2/40 =
+    4.315 ~ 4.3), well within the normal resting range (West; Nunn's).  This is
+    essentially self-consistent, so FiCO2 = 0 returns ~40.0 mmHg -- a negligible
+    offset from the assumed 40.
 
 Author: prepared for M. Kim, Isometabolism Review / Technical Note (2026).
 """
@@ -57,11 +56,11 @@ from dataclasses import dataclass
 MMHG_PER_KPA = 7.500617       # 1 kPa = 7.500617 mmHg
 KPA_PER_MMHG = 0.1333224      # 1 mmHg = 0.1333224 kPa
 
-# Literature resting alveolar ventilation, L/min (BTPS).
-# West, Respiratory Physiology: The Essentials; Nunn's Applied Respiratory
-# Physiology ("typical resting values might be ~4 L/min for alveolar
-# ventilation"). Zotero library -> "CO2 Ventilation" collection.
-VA_REST = 4.2
+# Resting alveolar ventilation fallback, L/min (BTPS).  Uses 4.3 -- the value
+# implied by the same VCO2 = 200 and PaCO2_base = 40 (K*VCO2/40 = 4.315 ~ 4.3),
+# which sits within the normal resting range (West; Nunn's ~4-5 L/min) and is
+# essentially self-consistent, so FiCO2 = 0 returns ~40.0 mmHg.
+VA_REST = 4.3
 
 DEFAULT_BASELINE = 40.0        # normocapnic resting PaCO2, mmHg
 
@@ -113,9 +112,9 @@ def params_from_baseline(paco2_base: float, **kw) -> Params:
 def params_resting_default(**kw) -> Params:
     """Only FiCO2 is known (no baseline) -> literature resting fallback.
 
-    PaCO2_base = 40 mmHg (HCVR reference point) and VA_base = 4.2 L/min
-    (West / Nunn's resting alveolar ventilation). These are not perfectly
-    self-consistent, so FiCO2 = 0 gives ~41 mmHg (a documented ~1 mmHg offset).
+    PaCO2_base = 40 mmHg (HCVR reference point) and VA_base = 4.3 L/min
+    (the self-consistent value K*VCO2/40 ~ 4.3, within the normal resting
+    range). These are essentially self-consistent, so FiCO2 = 0 returns ~40.0 mmHg.
     """
     return Params(PaCO2_base=DEFAULT_BASELINE, VA_base=VA_REST, **kw)
 

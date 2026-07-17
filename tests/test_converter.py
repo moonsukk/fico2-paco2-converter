@@ -54,12 +54,12 @@ def test_baseline_self_consistency():
         assert abs(fico2_to_paco2(0.0, p) - base) < 1e-9
 
 
-def test_resting_fallback_uses_4_2():
-    """No-baseline fallback: VA_base = 4.2 L/min, PaCO2_base = 40 mmHg."""
+def test_resting_fallback_uses_4_3():
+    """No-baseline fallback: VA_base = 4.3 L/min, PaCO2_base = 40 mmHg."""
     p = params_resting_default()
-    assert p.VA_base == VA_REST == 4.2
+    assert p.VA_base == VA_REST == 4.3
     assert p.PaCO2_base == DEFAULT_BASELINE == 40.0
-    # steep HCVR absorbs the small VA_base offset -> FiCO2 0 ~ 40.04 mmHg
+    # 4.3 is essentially the self-consistent value -> FiCO2 0 ~ 40.01 mmHg
     assert abs(fico2_to_paco2(0.0, p) - 40.0) < 0.1
 
 
