@@ -207,7 +207,7 @@ def fico2_to_paco2_numeric(fico2, p: Params | None = None,
 # slower central (medullary) component.  FIVE studies report both time
 # constants in normoxic humans during step hypercapnia:
 #
-#   study                        n    tau_fast     tau_central    f (peripheral share)
+#   study                        n    tau_fast     tau_central    λ (peripheral share)
 #   ---------------------------  ---  -----------  -------------  --------------------
 #   Swanson & Bellville (1975)    1   17.5 s       75.0 s         ~0.50
 #   Ward & Bellville   (1983)     6    5.7 s        72.0 s         0.29   (g2/(g1+g2))
@@ -227,7 +227,7 @@ def fico2_to_paco2_numeric(fico2, p: Params | None = None,
 #
 # The fraction of the acute steady-state response present at time t is
 #
-#       phi(t) = f (1 - e^{-t/tau_fast}) + (1 - f)(1 - e^{-t/tau_central}),
+#       phi(t) = λ (1 - e^{-t/tau_fast}) + (1 - λ)(1 - e^{-t/tau_central}),
 #
 # rising from 0 to 1 over the first ~5-10 min.  (Over hours-days the response
 # acclimatises, but that regime is variable between studies and is NOT
