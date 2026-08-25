@@ -1,7 +1,33 @@
-# Core converter (fico2_paco2_converter.py) and tests use only the Python
-# standard library -- nothing to install.
+# fico2-paco2-converter -- pinned environment
 #
-# The optional plot cell and the interactive notebook use these:
-matplotlib>=3.5     # optional: sensitivity plot in the notebook
-notebook>=6.4       # optional: to run FiCO2_PaCO2_conversion.ipynb
-pytest>=7.0         # optional: nicer test runner (tests also run standalone)
+# The converter itself (fico2_paco2_converter.py) and tests/test_converter.py
+# use only the Python standard library. Nothing here is needed to run them.
+#
+# The pins below are the environment the technical note's figures are rendered
+# with, via Technical_Note/_genfigs.py. matplotlib rasterises differently
+# between minor releases, so the figures are only mutually consistent when they
+# all come from one version -- treat these as exact, not as minimums.
+#
+# Rebuild with an explicit interpreter (3.12 or newer):
+#     /opt/anaconda3/bin/python3 -m venv .venv
+#     .venv/bin/python -m pip install -r requirements.txt
+#
+# Updated 2026-08-19 from Python 3.9.6 / numpy 2.0.2 / matplotlib 3.9.4.
+#
+# matplotlib is held at 3.10.9, not the newest release: it is the version the
+# figures currently in technical_note_v6.docx were rendered with, and this pin
+# reproduces them (same canvas on all four; two pixel-identical, two differing
+# by <=2/255 on <0.03% of pixels). 3.11.x resizes two canvases and re-flows
+# tight_layout by up to 1.2%, which would require replacing all four figures in
+# the manuscript at once. Bump it only when doing exactly that.
+
+numpy==2.5.2
+matplotlib==3.10.9
+
+# Test runner. The tests also run standalone via `python fico2_paco2_converter.py --selftest`.
+pytest==9.0.3
+
+# Optional -- only needed to open FiCO2_PaCO2_conversion.ipynb.
+notebook==7.6.2
+jupyterlab==4.6.3
+ipykernel==7.3.0
